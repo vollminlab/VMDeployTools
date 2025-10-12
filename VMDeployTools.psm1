@@ -49,6 +49,7 @@ $Script:Domain                  = 'vollminlab.com'
 $Script:VCenterServer           = 'vcenter.vollminlab.com'
 $Script:PiHoleServer            = 'pihole1.vollminlab.com'
 $Script:PiHolePort              = '5001'
+$Script:PreferredDatastores     = @('vmstore1', 'vmstore2')  # Shared storage preferred over local
 
 # ---------- 1Password Authentication State ----------
 # Memoization flag to avoid repeated authentication checks
@@ -900,19 +901,59 @@ runcmd:
 
     Test-VMHostReadiness -ClusterName $Script:ClusterName -VMName $VMName | Out-Null
 
+    # Determine minimum required space (requested disk size + 10% overhead)
+    $requiredGB = if ($DiskGB) { $DiskGB * 1.1 } else { 30 }  # Default to 30GB if not specified
+    
     $datastores = Get-Datastore | Where-Object { $_.State -eq "Available" }
     foreach ($ds in $datastores) {
       $freeGB = [math]::Round($ds.FreeSpaceGB, 2)
       Write-LogEntry -VMName $VMName -Message ("Datastore '{0}': {1}GB free" -f $ds.Name, $freeGB)
     }
 
-    $availableHosts = Get-VMHost -Location $clusterObj | Where-Object { $_.ConnectionState -eq "Connected" -and $_.State -ne "Maintenance" }
-    if ($availableHosts.Count -eq 0) { throw "No available hosts found for VM deployment." }
-    $targetHost = $availableHosts | Select-Object -First 1
-    Write-LogEntry -VMName $VMName -Message ("Selected host '{0}' for deployment" -f $targetHost.Name)
+    # Try shared storage first (accessible by all hosts)
+    $sharedDs = $datastores | 
+                Where-Object { $Script:PreferredDatastores -contains $_.Name -and $_.FreeSpaceGB -ge $requiredGB } | 
+                Sort-Object -Property FreeSpaceGB -Descending | 
+                Select-Object -First 1
+    
+    if ($sharedDs) {
+      # Shared storage available - can use any host
+      $preferredDs = $sharedDs
+      $availableHosts = Get-VMHost -Location $clusterObj | Where-Object { $_.ConnectionState -eq "Connected" -and $_.State -ne "Maintenance" }
+      if ($availableHosts.Count -eq 0) { throw "No available hosts found for VM deployment." }
+      $targetHost = $availableHosts | Sort-Object -Property CpuUsageMhz | Select-Object -First 1
+      Write-LogEntry -VMName $VMName -Message ("Selected shared datastore '{0}' ({1}GB free, {2}GB required)" -f $preferredDs.Name, [math]::Round($preferredDs.FreeSpaceGB, 2), [math]::Round($requiredGB, 2))
+      Write-LogEntry -VMName $VMName -Message ("Selected host '{0}' for deployment" -f $targetHost.Name)
+    } else {
+      # Shared storage full/unavailable - need to pick host with local datastore that has space
+      Write-LogEntry -VMName $VMName -Message "Shared storage unavailable, checking local datastores..."
+      
+      $availableHosts = Get-VMHost -Location $clusterObj | Where-Object { $_.ConnectionState -eq "Connected" -and $_.State -ne "Maintenance" }
+      if ($availableHosts.Count -eq 0) { throw "No available hosts found for VM deployment." }
+      
+      $hostWithSpace = $null
+      $localDs = $null
+      
+      foreach ($esxiHost in $availableHosts) {
+        $hostDatastores = $esxiHost | Get-Datastore | Where-Object { $_.State -eq "Available" -and $_.FreeSpaceGB -ge $requiredGB }
+        if ($hostDatastores) {
+          $localDs = $hostDatastores | Sort-Object -Property FreeSpaceGB -Descending | Select-Object -First 1
+          $hostWithSpace = $esxiHost
+          break
+        }
+      }
+      
+      if (-not $hostWithSpace -or -not $localDs) {
+        throw "No hosts found with local datastores having sufficient space ({0}GB required) for VM deployment." -f [math]::Round($requiredGB, 2)
+      }
+      
+      $targetHost = $hostWithSpace
+      $preferredDs = $localDs
+      Write-LogEntry -VMName $VMName -Message ("Selected host '{0}' with local datastore '{1}' ({2}GB free, {3}GB required)" -f $targetHost.Name, $preferredDs.Name, [math]::Round($preferredDs.FreeSpaceGB, 2), [math]::Round($requiredGB, 2))
+    }
 
     $poolObj = Get-ResourcePool -Location $clusterObj | Where-Object Name -eq "Resources"
-    $newVm   = New-VM -Name $VMName -Template $templateObj -Location $folderObj -ResourcePool $poolObj -VMHost $targetHost -ErrorAction Stop
+    $newVm   = New-VM -Name $VMName -Template $templateObj -Location $folderObj -ResourcePool $poolObj -VMHost $targetHost -Datastore $preferredDs -ErrorAction Stop
     Write-LogEntry -VMName $VMName -Message "New-VM succeeded"
   } catch {
     Write-LogEntry -VMName $VMName -Message ("New-VM FAILED: {0}" -f $_)
