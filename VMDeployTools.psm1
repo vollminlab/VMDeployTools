@@ -37,18 +37,25 @@
 # =========================
 
 # ---------- Settings ----------
-$Script:VaultName               = 'Homelab'
-$Script:SvcTokenItemTitle       = 'VMDeploy-SSHKeyBroker Token'
-$Script:VCenterCredItemTitle    = 'vCenter local user SSO'
-$Script:RemoteUserProfileShare  = '\\glados\c$\Users\Scott\.ssh'
+$Script:ConfigPath = Join-Path $PSScriptRoot 'VMDeployTools.config.psd1'
+if (-not (Test-Path $Script:ConfigPath)) {
+    throw ("Configuration file not found: {0}`n" +
+           "Copy VMDeployTools.config.example.psd1 to VMDeployTools.config.psd1 and fill in your values.") -f $Script:ConfigPath
+}
+$Script:Config = Import-PowerShellDataFile $Script:ConfigPath
+
+$Script:VaultName               = $Script:Config.VaultName
+$Script:SvcTokenItemTitle       = $Script:Config.SvcTokenItemTitle
+$Script:VCenterCredItemTitle    = $Script:Config.VCenterCredItemTitle
+$Script:RemoteUserProfileShare  = $Script:Config.RemoteUserProfileShare
 $Script:RemoteConfigPath        = Join-Path $Script:RemoteUserProfileShare 'config'
-$Script:IsGlados                = ($env:COMPUTERNAME -ieq 'GLADOS')
-$Script:ClusterName             = 'vollminlab-ESXi-Cluster'
-$Script:Domain                  = 'vollminlab.com'
-$Script:VCenterServer           = 'vcenter.vollminlab.com'
-$Script:PiHoleServer            = 'pihole1.vollminlab.com'
-$Script:PiHolePort              = '5001'
-$Script:PreferredDatastores     = @('vmstore1', 'vmstore2')  # Shared storage preferred over local
+$Script:IsGlados                = ($env:COMPUTERNAME -ieq $Script:Config.LocalMachineName)
+$Script:ClusterName             = $Script:Config.ClusterName
+$Script:Domain                  = $Script:Config.Domain
+$Script:VCenterServer           = $Script:Config.VCenterServer
+$Script:PiHoleServer            = $Script:Config.PiHoleServer
+$Script:PiHolePort              = $Script:Config.PiHolePort
+$Script:PreferredDatastores     = $Script:Config.PreferredDatastores  # Shared storage preferred over local
 
 # ---------- 1Password Authentication State ----------
 # Memoization flag to avoid repeated authentication checks

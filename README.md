@@ -30,36 +30,45 @@ PowerShell module for automated VM deployment in VMware vSphere with integrated 
 
 1. Clone this repository:
    ```powershell
-   git clone https://github.com/svollmi1/VMDeployTools.git
+   git clone https://github.com/VollminLab/VMDeployTools.git
    cd VMDeployTools
    ```
 
-2. Import the module:
+2. Create your local configuration file:
+   ```powershell
+   Copy-Item VMDeployTools.config.example.psd1 VMDeployTools.config.psd1
+   ```
+   Then open `VMDeployTools.config.psd1` and fill in your values (see [Configuration](#configuration) below).
+
+3. Import the module:
    ```powershell
    Import-Module .\VMDeployTools.psd1
    ```
 
-3. (Optional) Set the service account token permanently to avoid authentication prompts:
+4. (Optional) Set the service account token permanently to avoid authentication prompts:
    ```powershell
-   $token = op item get "VMDeploy-SSHKeyBroker Token" --vault "Homelab" --field password --reveal
+   $token = op item get "<SvcTokenItemTitle>" --vault "<VaultName>" --field password --reveal
    [Environment]::SetEnvironmentVariable('OP_SERVICE_ACCOUNT_TOKEN', $token, 'User')
    ```
 
 ## Configuration
 
-Edit the settings at the top of `VMDeployTools.psm1` to match your environment:
+Copy `VMDeployTools.config.example.psd1` to `VMDeployTools.config.psd1` and fill in your values.
+This file is gitignored and will never be committed.
 
-```powershell
-$Script:VaultName               = 'Homelab'
-$Script:SvcTokenItemTitle       = 'VMDeploy-SSHKeyBroker Token'
-$Script:VCenterCredItemTitle    = 'vCenter local user SSO'
-$Script:RemoteUserProfileShare  = '\\glados\c$\Users\Scott\.ssh'
-$Script:ClusterName             = 'vollminlab-ESXi-Cluster'
-$Script:Domain                  = 'vollminlab.com'
-$Script:VCenterServer           = 'vcenter.vollminlab.com'
-$Script:PiHoleServer            = 'pihole1.vollminlab.com'
-$Script:PiHolePort              = '5001'
-```
+| Key | Description |
+|-----|-------------|
+| `VaultName` | 1Password vault name |
+| `SvcTokenItemTitle` | 1Password item holding the service account token (field: `password`) |
+| `VCenterCredItemTitle` | 1Password item holding vCenter credentials (fields: `username` / `password`) |
+| `LocalMachineName` | Hostname of the machine running this module (used for SSH mirroring logic) |
+| `RemoteUserProfileShare` | UNC path to the `.ssh` directory on a secondary machine to mirror SSH config/keys to |
+| `VCenterServer` | vCenter hostname or IP |
+| `ClusterName` | VMware cluster name |
+| `PreferredDatastores` | Shared datastore names (preferred over local datastores for VM placement) |
+| `Domain` | Internal DNS domain appended to VM names |
+| `PiHoleServer` | Pi-hole hostname or IP |
+| `PiHolePort` | Pi-hole API port |
 
 ## Quick Start
 
@@ -68,7 +77,7 @@ $Script:PiHolePort              = '5001'
 ```powershell
 Invoke-VMDeployment -VMName "webserver01" `
                     -TemplateName "ubuntu-template" `
-                    -IPAddress "192.168.152.100" `
+                    -IPAddress "10.0.0.100" `
                     -VMFolder "Production" `
                     -CPU 4 `
                     -MemoryGB 8 `
@@ -104,7 +113,7 @@ This will:
 
 ```powershell
 Invoke-VMDeployment "testvm" -TemplateName "ubuntu-template" `
-    -IPAddress "192.168.152.100" -VMFolder "Lab" `
+    -IPAddress "10.0.0.100" -VMFolder "Lab" `
     -CPU 2 -MemoryGB 4 -DiskGB 30 -PowerOn -WhatIf
 
 Remove-VMDeployment "testvm" -WhatIf
@@ -114,7 +123,7 @@ Remove-VMDeployment "testvm" -WhatIf
 
 ```powershell
 Invoke-VMDeployment "prodvm" -TemplateName "ubuntu-template" `
-    -IPAddress "192.168.152.100" -VMFolder "Production" `
+    -IPAddress "10.0.0.100" -VMFolder "Production" `
     -CPU 4 -MemoryGB 8 -DiskGB 50 -PowerOn -ClearOpAuthToken
 ```
 
@@ -165,10 +174,10 @@ All operations are logged to `.\logs\{VMName}.log` with timestamps. Each log fil
 
 Example log output:
 ```
-[2025-10-12 03:05:09] Invoke-VMDeployment START Template=ubuntu-template,IP=192.168.152.100,Folder=Linux VMs,PowerOn=True
-[2025-10-12 03:05:09] Checking DNS for deploytest.vollminlab.com
-[2025-10-12 03:05:14] Mirrored SSH pub + config to GLaDOS
-[2025-10-12 03:05:15] Added Pi-hole A record for deploytest.vollminlab.com -> 192.168.152.100
+[2025-10-12 03:05:09] Invoke-VMDeployment START Template=ubuntu-template,IP=10.0.0.100,Folder=Linux VMs,PowerOn=True
+[2025-10-12 03:05:09] Checking DNS for deploytest.yourdomain.local
+[2025-10-12 03:05:14] Mirrored SSH pub + config to remote host
+[2025-10-12 03:05:15] Added Pi-hole A record for deploytest.yourdomain.local -> 10.0.0.100
 [2025-10-12 03:05:15] Install-VirtualMachine START
 [2025-10-12 03:05:17] Created sudo credential in 1Password 'deploytest'
 [2025-10-12 03:05:39] New-VM succeeded
@@ -241,7 +250,7 @@ Expected output:
 
 The module checks for existing DNS records before deployment. If a record exists, the deployment will abort with an error. Remove the old record first:
 ```powershell
-Remove-DnsRecordFromPiHole -Fqdn "hostname.vollminlab.com"
+Remove-DnsRecordFromPiHole -Fqdn "hostname.yourdomain.local"
 ```
 
 ### VM Already Exists
@@ -262,7 +271,7 @@ Import-Module .\VMDeployTools.psd1
 1..3 | ForEach-Object {
     Invoke-VMDeployment -VMName "web0$_" `
                         -TemplateName "ubuntu-template" `
-                        -IPAddress "192.168.152.10$_" `
+                        -IPAddress "10.0.0.10$_" `
                         -VMFolder "WebServers" `
                         -CPU 2 -MemoryGB 4 -DiskGB 30 -PowerOn
 }
@@ -273,7 +282,7 @@ Import-Module .\VMDeployTools.psd1
 ```powershell
 # This will prompt for confirmation (ConfirmImpact='Medium')
 Invoke-VMDeployment "prodvm" -TemplateName "ubuntu-template" `
-    -IPAddress "192.168.152.100" -VMFolder "Production" `
+    -IPAddress "10.0.0.100" -VMFolder "Production" `
     -CPU 8 -MemoryGB 16 -DiskGB 100 -PowerOn -Confirm
 ```
 

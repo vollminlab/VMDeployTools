@@ -1,0 +1,5 @@
+# Local environment config (copy from VMDeployTools.config.example.psd1 and fill in your values)
+VMDeployTools.config.psd1
+
+# Deployment logs
+logs/
