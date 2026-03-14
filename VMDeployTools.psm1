@@ -325,7 +325,7 @@ function Add-DnsRecordToPiHole {
     }
   }
   catch { 
-    $status = $_.Exception.Response?.StatusCode ?? "Unknown"
+    $status = if ($_.Exception.Response) { $_.Exception.Response.StatusCode } else { "Unknown" }
     Write-LogEntry -VMName $vm -Message ("Failed to add Pi-hole A record: Status=$status, Error=$_")
   }
 }
@@ -363,7 +363,7 @@ function Remove-DnsRecordFromPiHole {
     Write-LogEntry -VMName $vm -Message "Deleted Pi-hole A record for $Fqdn" 
   }
   catch { 
-    $status = $_.Exception.Response?.StatusCode ?? "Unknown"
+    $status = if ($_.Exception.Response) { $_.Exception.Response.StatusCode } else { "Unknown" }
     Write-LogEntry -VMName $vm -Message ("Failed to delete Pi-hole A record: Status=$status, Error=$_")
   }
 }
