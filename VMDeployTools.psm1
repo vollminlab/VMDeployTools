@@ -306,9 +306,9 @@ function Get-PiHoleApiToken {
   #>
   Initialize-OpAuth
   
-  $token = & op item get "recordimporter-api-token" `
+  $token = & op item get "Recordimporter" `
               --vault $Script:VaultName `
-              --field password `
+              --field credential `
               --format human-readable `
               --reveal
   
