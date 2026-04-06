@@ -30,12 +30,6 @@
     # Shared datastores preferred over local datastores during VM placement
     PreferredDatastores     = @('datastore1', 'datastore2')
 
-    # -- SSH Config Repo --
-    # Absolute path to the SSH config file tracked in your infrastructure repo.
-    # When set, VM deploy/remove will sync the Host block and auto-commit/push.
-    # Leave empty '' to disable repo sync.
-    SshConfigRepoPath       = 'C:/git/homelab-infrastructure/hosts/windows/ssh/config'
-
     # -- DNS / Network --
     # Internal DNS domain (appended to VM names for FQDNs)
     Domain                  = 'yourdomain.local'

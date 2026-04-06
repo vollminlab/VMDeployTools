@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     VMDeployTools - Automated VM deployment with cloud-init, SSH key management, and DNS integration.
 
@@ -39,8 +39,30 @@
 # ---------- Settings ----------
 $Script:ConfigPath = Join-Path $PSScriptRoot 'VMDeployTools.config.psd1'
 if (-not (Test-Path $Script:ConfigPath)) {
-    throw ("Configuration file not found: {0}`n" +
-           "Copy VMDeployTools.config.example.psd1 to VMDeployTools.config.psd1 and fill in your values.") -f $Script:ConfigPath
+    Write-Host "VMDeployTools.config.psd1 not found - attempting to bootstrap from 1Password..."
+
+    if (-not (Get-Command op -ErrorAction SilentlyContinue)) {
+        throw "VMDeployTools.config.psd1 not found and 1Password CLI (op) is not in PATH. " +
+              "Copy VMDeployTools.config.example.psd1 to VMDeployTools.config.psd1 and fill in your values."
+    }
+
+    # Bootstrap: read the config note from 1Password and write the local file.
+    # Uses whatever op auth is available (service account token, existing session, or biometric).
+    $noteContent = & op item get "VMDeployTools Config" --vault Homelab --field notesPlain --reveal 2>$null
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($noteContent)) {
+        # Not signed in yet - attempt interactive signin
+        Write-Host "Signing in to 1Password..."
+        & op signin 2>&1 | Out-Null
+        $noteContent = & op item get "VMDeployTools Config" --vault Homelab --field notesPlain --reveal 2>$null
+    }
+
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($noteContent)) {
+        throw "Failed to retrieve 'VMDeployTools Config' from 1Password. " +
+              "Create the config manually: copy VMDeployTools.config.example.psd1 to VMDeployTools.config.psd1 and fill in your values."
+    }
+
+    Set-Content -Path $Script:ConfigPath -Value $noteContent -Encoding UTF8
+    Write-Host "VMDeployTools.config.psd1 created from 1Password."
 }
 $Script:Config = Import-PowerShellDataFile $Script:ConfigPath
 
@@ -56,7 +78,12 @@ $Script:VCenterServer           = $Script:Config.VCenterServer
 $Script:PiHoleServer            = $Script:Config.PiHoleServer
 $Script:PiHolePort              = $Script:Config.PiHolePort
 $Script:PreferredDatastores     = $Script:Config.PreferredDatastores  # Shared storage preferred over local
-$Script:SshConfigRepoPath       = $Script:Config.SshConfigRepoPath
+
+# Discover the SSH config file in the homelab-infrastructure sibling repo at load time.
+# Find-SiblingRepo is defined later in this file but PowerShell resolves function calls
+# at runtime not parse time, so this is safe as long as the module is fully loaded before use.
+# We resolve it eagerly here so callers don't pay the git discovery cost on every deploy.
+$Script:SshConfigRepoPath       = $null  # resolved at end of module after Find-SiblingRepo is defined
 
 # ---------- 1Password Authentication State ----------
 # Memoization flag to avoid repeated authentication checks
@@ -225,6 +252,60 @@ function New-RandomPassword {
   param([int]$Length = 24)
   $chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()_-+=<>?'
   -join (1..$Length | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
+}
+
+function Find-SiblingRepo {
+  <#
+  .SYNOPSIS
+      Locates a sibling git repository by matching the GitHub org/owner of this repo.
+
+  .DESCRIPTION
+      Reads this module's own git remote URL to determine the GitHub owner, then walks
+      sibling directories looking for a git repo under the same owner whose name matches
+      the requested repo. Returns the repo root path, or $null if not found.
+
+      This avoids hardcoded paths entirely - the repos just need to be cloned by the
+      same GitHub user somewhere on disk, in the same parent directory.
+
+  .PARAMETER RepoName
+      The GitHub repository name to find (e.g. 'homelab-infrastructure').
+
+  .PARAMETER RelativePath
+      Optional file/folder path relative to the repo root to return instead of the root.
+
+  .EXAMPLE
+      $path = Find-SiblingRepo -RepoName 'homelab-infrastructure' `
+                               -RelativePath 'hosts/windows/ssh/config'
+  #>
+  param(
+    [Parameter(Mandatory)][string]$RepoName,
+    [string]$RelativePath
+  )
+
+  # Determine this repo's GitHub owner from its remote URL
+  $myRemote = & git -C $PSScriptRoot remote get-url origin 2>$null
+  if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($myRemote)) { return $null }
+
+  # Parse owner from https://github.com/owner/repo or git@github.com:owner/repo
+  $owner = $null
+  if ($myRemote -match 'github\.com[:/]([^/]+)/') {
+    $owner = $Matches[1]
+  }
+  if (-not $owner) { return $null }
+
+  # Walk sibling directories looking for a git repo matching owner/RepoName
+  $parentDir = Split-Path $PSScriptRoot -Parent
+  foreach ($dir in (Get-ChildItem -Path $parentDir -Directory -ErrorAction SilentlyContinue)) {
+    $remote = & git -C $dir.FullName remote get-url origin 2>$null
+    if ($LASTEXITCODE -ne 0) { continue }
+    if ($remote -match "github\.com[:/]$([regex]::Escape($owner))/$([regex]::Escape($RepoName))") {
+      if ($RelativePath) {
+        return Join-Path $dir.FullName $RelativePath
+      }
+      return $dir.FullName
+    }
+  }
+  return $null
 }
 
 function ConvertTo-SHA512Crypt {
@@ -652,13 +733,13 @@ function New-1PSSHKeyForHost {
 
   $title = "${HostName}_id_ed25519"
 
-  # Use item list to find by title — avoids ambiguity errors when duplicates exist
+  # Use item list to find by title - avoids ambiguity errors when duplicates exist
   $itemListJson = & op item list --vault $Script:VaultName --categories "SSH Key" --format json 2>$null
   $itemId = $null
   if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($itemListJson)) {
     $foundItems = ($itemListJson | ConvertFrom-Json) | Where-Object { $_.title -eq $title }
     if ($foundItems.Count -gt 1) {
-      # Duplicates present — warn and use the most recently updated one
+      # Duplicates present - warn and use the most recently updated one
       Write-LogEntry -VMName $HostName -Message ("WARNING: {0} duplicate SSH key items named '{1}' found in 1Password. Using the most recent. Consider deleting duplicates." -f $foundItems.Count, $title) -AlwaysShow
       $itemId = ($foundItems | Sort-Object { $_.updated_at } -Descending | Select-Object -First 1).id
     } elseif ($foundItems.Count -eq 1) {
@@ -667,7 +748,7 @@ function New-1PSSHKeyForHost {
   }
 
   if ($itemId) {
-    Write-LogEntry -VMName $HostName -Message "SSH key '$title' already exists in 1Password — reusing it" -AlwaysShow
+    Write-LogEntry -VMName $HostName -Message "SSH key '$title' already exists in 1Password - reusing it" -AlwaysShow
   } else {
     # Generate SSH key directly in 1Password using op item create
     $result = & op item create `
@@ -775,13 +856,13 @@ function Invoke-SshConfigRepoCommit {
 
   .DESCRIPTION
       Stages the SSH config file, commits with a descriptive message, and pushes.
-      Failures warn but never throw — a git issue should never abort a deployment.
+      Failures warn but never throw - a git issue should never abort a deployment.
 
   .PARAMETER VMName
       Used for the commit message and log entries.
 
   .PARAMETER Action
-      'add' or 'remove' — used in the commit message.
+      'add' or 'remove' - used in the commit message.
   #>
   param(
     [Parameter(Mandatory)][string]$VMName,
@@ -796,7 +877,7 @@ function Invoke-SshConfigRepoCommit {
 
   $repoRoot = & git -C (Split-Path $Script:SshConfigRepoPath) rev-parse --show-toplevel 2>$null
   if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($repoRoot)) {
-    Write-Warning "SSH config repo not found at '$Script:SshConfigRepoPath' — skipping commit"
+    Write-Warning "SSH config repo not found at '$Script:SshConfigRepoPath' - skipping commit"
     return
   }
 
@@ -814,7 +895,7 @@ function Invoke-SshConfigRepoCommit {
     if ($LASTEXITCODE -ne 0) { throw "git commit failed" }
     & git -C $repoRoot push 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "git push failed" }
-    Write-LogEntry -VMName $VMName -Message "SSH config repo: committed and pushed — '$commitMsg'" -AlwaysShow
+    Write-LogEntry -VMName $VMName -Message "SSH config repo: committed and pushed - '$commitMsg'" -AlwaysShow
   } catch {
     $msg = "WARN: Failed to commit/push SSH config repo change: $_"
     Write-LogEntry -VMName $VMName -Message $msg -AlwaysShow
@@ -1393,13 +1474,13 @@ function Invoke-VMDeployment {
 
   # Validate vCenter prerequisites BEFORE any side effects.
   # Connects to vCenter and confirms template/folder/cluster exist.
-  # If any check fails we abort here — nothing has been created yet.
+  # If any check fails we abort here - nothing has been created yet.
   Test-VMDeploymentPrerequisites -VMName $VMName -TemplateName $TemplateName -VMFolder $VMFolder
 
   # Create SSH key in 1Password (ed25519), save pub locally, no private key on disk
   $key = New-1PSSHKeyForHost -HostName $VMName
 
-  # Build list of SSH config files to update — always ~/.ssh/config, plus the repo copy if configured
+  # Build list of SSH config files to update - always ~/.ssh/config, plus the repo copy if configured
   $sshConfigPaths = @(Join-Path $HOME '.ssh\config')
   if (-not [string]::IsNullOrWhiteSpace($Script:SshConfigRepoPath)) {
     $sshConfigPaths += $Script:SshConfigRepoPath
@@ -1418,7 +1499,7 @@ function Invoke-VMDeployment {
 
   Add-DnsRecordToPiHole -Fqdn $fqdn -IPAddress $IPAddress
 
-  # Deploy the VM (Connect-ToVCenter is a no-op — already connected by Test-VMDeploymentPrerequisites)
+  # Deploy the VM (Connect-ToVCenter is a no-op - already connected by Test-VMDeploymentPrerequisites)
   $passwordRef = [ref]""
   Install-VirtualMachine `
     -VMName           $VMName `
@@ -1581,4 +1662,15 @@ function Remove-VMDeployment {
     Clear-OpAuth
     Write-LogEntry -VMName $VMName -Message "Cleared 1Password authentication token"
   }
+}
+
+
+# ---------- Post-load initialization ----------
+# Resolve the SSH config repo path now that Find-SiblingRepo is defined.
+$Script:SshConfigRepoPath = Find-SiblingRepo -RepoName 'homelab-infrastructure' `
+                                              -RelativePath 'hosts/windows/ssh/config'
+if ($Script:SshConfigRepoPath) {
+  Write-Verbose "SSH config repo found: $Script:SshConfigRepoPath"
+} else {
+  Write-Warning "homelab-infrastructure repo not found as a sibling of this repo. SSH config will not be synced to the infrastructure repo."
 }
