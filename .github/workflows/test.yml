@@ -13,7 +13,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6.0.2
 
       - name: Prepare test config
         shell: pwsh
@@ -42,7 +42,7 @@ jobs:
           if ($result.FailedCount -gt 0) { exit 1 }
 
       - name: Upload test results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.0
         if: always()
         with:
           name: pester-test-results
