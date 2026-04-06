@@ -54,7 +54,6 @@ $Script:ClusterName             = $Script:Config.ClusterName
 $Script:Domain                  = $Script:Config.Domain
 $Script:VCenterServer           = $Script:Config.VCenterServer
 $Script:PiHoleServer            = $Script:Config.PiHoleServer
-$Script:PiHoleServerFallback    = $Script:Config.PiHoleServerFallback
 $Script:PiHolePort              = $Script:Config.PiHolePort
 $Script:PreferredDatastores     = $Script:Config.PreferredDatastores  # Shared storage preferred over local
 
@@ -269,27 +268,10 @@ function Invoke-PiHoleRequest {
     [string]$Body
   )
 
-  $servers = @($Script:PiHoleServer)
-  if (-not [string]::IsNullOrWhiteSpace($Script:PiHoleServerFallback)) {
-    $servers += $Script:PiHoleServerFallback
-  }
-
-  $lastError = $null
-  foreach ($server in $servers) {
-    $url = "http://${server}:$($Script:PiHolePort)/$Endpoint"
-    try {
-      $params = @{ Uri = $url; Method = $Method; Headers = $Headers }
-      if ($Body) { $params.Body = $Body }
-      return Invoke-RestMethod @params
-    }
-    catch {
-      # Got an HTTP response — API error, no point trying the fallback
-      if ($_.Exception.Response) { throw }
-      # No response — connection failure, try next server
-      $lastError = $_
-    }
-  }
-  throw $lastError
+  $url = "http://$($Script:PiHoleServer):$($Script:PiHolePort)/$Endpoint"
+  $params = @{ Uri = $url; Method = $Method; Headers = $Headers }
+  if ($Body) { $params.Body = $Body }
+  return Invoke-RestMethod @params
 }
 
 function Get-PiHoleApiToken {
@@ -350,16 +332,18 @@ function Add-DnsRecordToPiHole {
   $hdr      = @{ Authorization = "Bearer $token"; "Content-Type" = "application/json" }
   $body     = @{ domain = $Fqdn; ip = $IPAddress } | ConvertTo-Json
   try {
-    $response = Invoke-PiHoleRequest -Endpoint "add-a-record" -Method Post -Headers $hdr -Body $body
-    if ($response.message -match "already exists") {
-      Write-LogEntry -VMName $vm -Message "Pi-hole A record already exists for $Fqdn"
-    } else {
-      Write-LogEntry -VMName $vm -Message "Added Pi-hole A record for $Fqdn -> $IPAddress"
-    }
+    Invoke-PiHoleRequest -Endpoint "add-a-record" -Method Post -Headers $hdr -Body $body | Out-Null
+    Write-LogEntry -VMName $vm -Message "Added Pi-hole A record for $Fqdn -> $IPAddress" -AlwaysShow
   }
   catch {
-    $status = if ($_.Exception.Response) { $_.Exception.Response.StatusCode } else { "Unknown" }
-    Write-LogEntry -VMName $vm -Message ("Failed to add Pi-hole A record: Status=$status, Error=$_")
+    $status = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { $null }
+    if ($status -eq 409) {
+      Write-LogEntry -VMName $vm -Message "Pi-hole A record already exists for $Fqdn" -AlwaysShow
+    } else {
+      $msg = "Failed to add Pi-hole A record for $Fqdn`: Status=$status, Error=$_"
+      Write-LogEntry -VMName $vm -Message $msg -AlwaysShow
+      Write-Warning $msg
+    }
   }
 }
 
@@ -392,11 +376,17 @@ function Remove-DnsRecordFromPiHole {
   $body     = @{ domain = $Fqdn } | ConvertTo-Json
   try {
     Invoke-PiHoleRequest -Endpoint "delete-a-record" -Method Delete -Headers $hdr -Body $body | Out-Null
-    Write-LogEntry -VMName $vm -Message "Deleted Pi-hole A record for $Fqdn"
+    Write-LogEntry -VMName $vm -Message "Deleted Pi-hole A record for $Fqdn" -AlwaysShow
   }
   catch {
-    $status = if ($_.Exception.Response) { $_.Exception.Response.StatusCode } else { "Unknown" }
-    Write-LogEntry -VMName $vm -Message ("Failed to delete Pi-hole A record: Status=$status, Error=$_")
+    $status = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { $null }
+    if ($status -eq 404) {
+      Write-LogEntry -VMName $vm -Message "Pi-hole A record not found for $Fqdn (may have already been removed)" -AlwaysShow
+    } else {
+      $msg = "Failed to delete Pi-hole A record for $Fqdn`: Status=$status, Error=$_"
+      Write-LogEntry -VMName $vm -Message $msg -AlwaysShow
+      Write-Warning $msg
+    }
   }
 }
 

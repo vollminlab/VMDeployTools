@@ -34,11 +34,8 @@
     # Internal DNS domain (appended to VM names for FQDNs)
     Domain                  = 'yourdomain.local'
 
-    # Pi-hole hostname or IP (primary)
+    # Pi-hole API endpoint — use a VRRP/keepalived VIP if running HA Pi-hole, not an individual node IP
     PiHoleServer            = 'pihole.yourdomain.local'
-
-    # Pi-hole fallback hostname or IP — used if primary is unreachable (leave empty to disable)
-    PiHoleServerFallback    = ''
 
     # Pi-hole API port
     PiHolePort              = '5001'
