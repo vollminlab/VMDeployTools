@@ -843,7 +843,7 @@ Host $HostName
 
   foreach ($conf in $ConfigPaths) {
     if (-not (Test-Path $conf)) { New-Item -ItemType File -Path $conf -Force | Out-Null }
-    if (-not (Select-String -Path $conf -Pattern "^Host\s+$([regex]::Escape($HostName))\$" -Quiet)) {
+    if (-not (Select-String -Path $conf -Pattern "^Host\s+$([regex]::Escape($HostName))\s*$" -Quiet)) {
       Add-Content -Path $conf -Value $entry
     }
   }
@@ -949,7 +949,7 @@ function Update-RemoteGladosSsh {
     if (-not (Test-Path $Script:RemoteConfigPath)) {
       New-Item -ItemType File -Path $Script:RemoteConfigPath -Force | Out-Null
     }
-    $hasHost = Select-String -Path $Script:RemoteConfigPath -Pattern "^Host\s+$([regex]::Escape($HostName))\$" -Quiet
+    $hasHost = Select-String -Path $Script:RemoteConfigPath -Pattern "^Host\s+$([regex]::Escape($HostName))\s*$" -Quiet
     if (-not $hasHost) {
       $entry = @"
 Host $HostName
@@ -1494,7 +1494,11 @@ function Invoke-VMDeployment {
             -PublicKeyText $key.PublicKeyText `
             -PublicKeyFileName ([IO.Path]::GetFileName($key.PublicKeyPathLocal))
     if ($ok) { Write-LogEntry -VMName $VMName -Message "Mirrored SSH pub + config to GLaDOS" }
-    else     { Write-LogEntry -VMName $VMName -Message "Skipped/failed mirroring to GLaDOS (share inaccessible)" }
+    else {
+      $warnMsg = "Skipped/failed mirroring SSH config to GLaDOS (share inaccessible) - SSH access from GLaDOS may not work for $VMName"
+      Write-Warning $warnMsg
+      Write-LogEntry -VMName $VMName -Message $warnMsg
+    }
   }
 
   Add-DnsRecordToPiHole -Fqdn $fqdn -IPAddress $IPAddress
@@ -1569,34 +1573,38 @@ function Remove-VMDeployment {
   Write-LogEntry -VMName $VMName -Message "Remove-VMDeployment START" -AlwaysShow
 
   # 1) DNS
-  Remove-DnsRecordFromPiHole -Fqdn $fqdn
+  try {
+    Remove-DnsRecordFromPiHole -Fqdn $fqdn
+  } catch {
+    Write-Warning "DNS cleanup failed for $fqdn (continuing): $_"
+    Write-LogEntry -VMName $VMName -Message "WARN: DNS cleanup failed for ${fqdn}: $_"
+  }
 
   # 2) Local SSH artifacts
-  if (Test-Path $localPub) {
-    Remove-Item -Path $localPub -Force
-    Write-LogEntry -VMName $VMName -Message "Removed local SSH public key $localPub"
-  }
-  $localConfig = Join-Path $HOME '.ssh\config'
-  if (Test-Path $localConfig) {
-    Remove-HostBlockFromConfig -HostName $VMName -ConfigPath $localConfig
-    Write-LogEntry -VMName $VMName -Message "Removed local SSH config entry for $VMName"
-  }
-  if (-not [string]::IsNullOrWhiteSpace($Script:SshConfigRepoPath) -and (Test-Path $Script:SshConfigRepoPath)) {
-    Remove-HostBlockFromConfig -HostName $VMName -ConfigPath $Script:SshConfigRepoPath
-    Write-LogEntry -VMName $VMName -Message "Removed SSH config entry from repo copy"
-    Invoke-SshConfigRepoCommit -VMName $VMName -Action 'remove'
-  }
-  
-  # Remove from local known_hosts (hostname and FQDN)
-  $localKnownHosts = Join-Path $HOME '.ssh\known_hosts'
-  if (Test-Path $localKnownHosts) {
-    if (-not [string]::IsNullOrWhiteSpace($VMName)) {
+  try {
+    if (Test-Path $localPub) {
+      Remove-Item -Path $localPub -Force
+      Write-LogEntry -VMName $VMName -Message "Removed local SSH public key $localPub"
+    }
+    $localConfig = Join-Path $HOME '.ssh\config'
+    if (Test-Path $localConfig) {
+      Remove-HostBlockFromConfig -HostName $VMName -ConfigPath $localConfig
+      Write-LogEntry -VMName $VMName -Message "Removed local SSH config entry for $VMName"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($Script:SshConfigRepoPath) -and (Test-Path $Script:SshConfigRepoPath)) {
+      Remove-HostBlockFromConfig -HostName $VMName -ConfigPath $Script:SshConfigRepoPath
+      Write-LogEntry -VMName $VMName -Message "Removed SSH config entry from repo copy"
+      Invoke-SshConfigRepoCommit -VMName $VMName -Action 'remove'
+    }
+    $localKnownHosts = Join-Path $HOME '.ssh\known_hosts'
+    if (Test-Path $localKnownHosts) {
       Remove-HostFromKnownHosts -HostName $VMName -KnownHostsPath $localKnownHosts
-    }
-    if (-not [string]::IsNullOrWhiteSpace($fqdn)) {
       Remove-HostFromKnownHosts -HostName $fqdn -KnownHostsPath $localKnownHosts
+      Write-LogEntry -VMName $VMName -Message "Removed entries from local known_hosts"
     }
-    Write-LogEntry -VMName $VMName -Message "Removed entries from local known_hosts"
+  } catch {
+    Write-Warning "Local SSH cleanup failed for $VMName (continuing): $_"
+    Write-LogEntry -VMName $VMName -Message "WARN: Local SSH cleanup failed for ${VMName}: $_"
   }
 
   # 3) Remote GLaDOS mirrors (only if not on GLaDOS; safe to try from either)
@@ -1625,24 +1633,25 @@ function Remove-VMDeployment {
       }
     }
   } catch {
-    Write-LogEntry -VMName $VMName -Message "Remote cleanup skipped/failed: $_"
+    Write-Warning "Remote GLaDOS cleanup failed for $VMName (continuing): $_"
+    Write-LogEntry -VMName $VMName -Message "WARN: Remote cleanup skipped/failed: $_"
   }
 
   # 4) Archive SSH Key item and sudo password item
-  Initialize-OpAuth
   try {
+    Initialize-OpAuth
     op item delete $keyTitle --vault $Script:VaultName --archive | Out-Null
     Write-LogEntry -VMName $VMName -Message "Archived 1Password SSH Key '$keyTitle'"
-    
-    # Archive sudo password item too
     try {
       op item delete $VMName --vault $Script:VaultName --archive | Out-Null
       Write-LogEntry -VMName $VMName -Message "Archived 1Password sudo credential '$VMName'"
     } catch {
+      Write-Warning "Failed to archive 1Password sudo credential '$VMName' (continuing): $_"
       Write-LogEntry -VMName $VMName -Message "WARN: Failed to archive sudo credential '$VMName' in 1Password: $_"
     }
   } catch {
-    Write-LogEntry -VMName $VMName -Message "WARN: Failed to archive '$keyTitle' in 1Password: $_"
+    Write-Warning "Failed to archive 1Password items for '$VMName' (continuing): $_"
+    Write-LogEntry -VMName $VMName -Message "WARN: Failed to archive 1Password items for '${VMName}': $_"
   }
 
   # 5) Remove VM
