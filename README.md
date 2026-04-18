@@ -26,8 +26,8 @@ PowerShell module for automated VM deployment in VMware vSphere with integrated 
 ## Installation
 
 ```powershell
-git clone https://github.com/svollmi1/VMDeployTools
-git clone https://github.com/svollmi1/homelab-infrastructure  # sibling repo, same parent dir
+git clone https://github.com/vollminlab/VMDeployTools
+git clone https://github.com/vollminlab/homelab-infrastructure  # sibling repo, same parent dir
 ```
 
 Import the module. On first import, if `VMDeployTools.config.psd1` does not exist it is
@@ -132,8 +132,8 @@ Full rebuild on a new machine:
 ```powershell
 # 1. Install prerequisites: 1Password CLI, 1Password desktop (SSH agent)
 # 2. Clone repos into the same parent directory
-git clone https://github.com/svollmi1/VMDeployTools
-git clone https://github.com/svollmi1/homelab-infrastructure
+git clone https://github.com/vollminlab/VMDeployTools
+git clone https://github.com/vollminlab/homelab-infrastructure
 
 # 3. Import - config bootstraps from 1Password, infra repo is auto-discovered
 Import-Module .\VMDeployTools\VMDeployTools.psd1
