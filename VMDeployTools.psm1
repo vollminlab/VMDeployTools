@@ -833,12 +833,13 @@ function Add-SshConfigEntryLocal {
     $ConfigPaths = @(Join-Path $HOME '.ssh\config')
   }
 
+  $keyFileName = [System.IO.Path]::GetFileName($PublicKeyPath)
   $entry = @"
+
 Host $HostName
   HostName $DnsName
   User vollmin
-  IdentitiesOnly yes
-  IdentityFile $PublicKeyPath
+  IdentityFile ~/.ssh/$keyFileName
 "@
 
   foreach ($conf in $ConfigPaths) {
@@ -884,22 +885,44 @@ function Invoke-SshConfigRepoCommit {
   $verb = if ($Action -eq 'add') { 'Add' } else { 'Remove' }
   $commitMsg = "$verb SSH config entry for $VMName"
 
+  $branch = "chore/ssh-config-$Action-$($VMName.ToLower())"
+
   try {
+    & git -C $repoRoot checkout -b $branch 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "git checkout -b failed" }
+
     & git -C $repoRoot add (Resolve-Path $Script:SshConfigRepoPath) 2>&1 | Out-Null
     $status = & git -C $repoRoot status --porcelain (Resolve-Path $Script:SshConfigRepoPath) 2>$null
     if ([string]::IsNullOrWhiteSpace($status)) {
       Write-LogEntry -VMName $VMName -Message "SSH config repo: no changes to commit (entry already present)"
+      & git -C $repoRoot checkout main 2>&1 | Out-Null
+      & git -C $repoRoot branch -d $branch 2>&1 | Out-Null
       return
     }
+
     & git -C $repoRoot commit -m $commitMsg 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "git commit failed" }
-    & git -C $repoRoot push 2>&1 | Out-Null
+
+    & git -C $repoRoot push -u origin $branch 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "git push failed" }
-    Write-LogEntry -VMName $VMName -Message "SSH config repo: committed and pushed - '$commitMsg'" -AlwaysShow
+
+    Push-Location $repoRoot
+    $prUrl = & gh pr create --title $commitMsg --body "" --base main --head $branch 2>&1
+    $prExitCode = $LASTEXITCODE
+    Pop-Location
+
+    if ($prExitCode -eq 0) {
+      Write-LogEntry -VMName $VMName -Message "SSH config repo: PR opened - $prUrl" -AlwaysShow
+    } else {
+      Write-LogEntry -VMName $VMName -Message "SSH config repo: branch pushed as '$branch' - open PR manually" -AlwaysShow
+    }
+
+    & git -C $repoRoot checkout main 2>&1 | Out-Null
   } catch {
     $msg = "WARN: Failed to commit/push SSH config repo change: $_"
     Write-LogEntry -VMName $VMName -Message $msg -AlwaysShow
     Write-Warning $msg
+    & git -C $repoRoot checkout main 2>&1 | Out-Null
   }
 }
 
@@ -952,10 +975,10 @@ function Update-RemoteGladosSsh {
     $hasHost = Select-String -Path $Script:RemoteConfigPath -Pattern "^Host\s+$([regex]::Escape($HostName))\s*$" -Quiet
     if (-not $hasHost) {
       $entry = @"
+
 Host $HostName
   HostName $DnsName
   User vollmin
-  IdentitiesOnly yes
   IdentityFile ~/.ssh/$PublicKeyFileName
 "@
       Add-Content -Path $Script:RemoteConfigPath -Value $entry
